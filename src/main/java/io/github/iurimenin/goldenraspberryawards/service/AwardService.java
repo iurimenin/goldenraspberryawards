@@ -3,15 +3,15 @@ package io.github.iurimenin.goldenraspberryawards.service;
 import io.github.iurimenin.goldenraspberryawards.domain.MovieEntity;
 import io.github.iurimenin.goldenraspberryawards.dto.AwardIntervalsResponseDTO;
 import io.github.iurimenin.goldenraspberryawards.dto.ProducerIntervalDTO;
+import io.github.iurimenin.goldenraspberryawards.dto.WinEntry;
 import io.github.iurimenin.goldenraspberryawards.repository.MovieRepository;
 import jakarta.annotation.Nonnull;
 import org.springframework.stereotype.Service;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
+import java.util.IntSummaryStatistics;
+import java.util.stream.IntStream;
 
 @Service
 public class AwardService {
@@ -26,84 +26,49 @@ public class AwardService {
 
         List<MovieEntity> winners = movieRepository.findAllByWinnerTrue();
 
-        Map<String, List<Integer>> winsByProducer = new HashMap<>();
+        List<WinEntry> entries = winners.stream()
+                .flatMap(movie -> parseProducers(movie.getProducers()).stream()
+                        .map(producer -> new WinEntry(producer, movie.getYear())))
+                .toList();
 
-        winners.forEach(movieEntity -> {
-
-            List<String> producers = this.handleProducers(movieEntity.getProducers());
-            producers.forEach(producer -> {
-                winsByProducer.computeIfAbsent(producer, key -> new ArrayList<>()).add(movieEntity.getYear());
-            });
-        });
-
-        List<ProducerIntervalDTO> intervals = this.handleIntervals(winsByProducer);
+        List<ProducerIntervalDTO> intervals = calculateIntervals(entries);
 
         if (intervals.isEmpty()) {
-            return new AwardIntervalsResponseDTO(
-                    Collections.emptyList(),
-                    Collections.emptyList()
-            );
+            return new AwardIntervalsResponseDTO(List.of(), List.of());
         }
 
-        int minInterval = intervals.stream()
+        IntSummaryStatistics stats = intervals.stream()
                 .mapToInt(ProducerIntervalDTO::interval)
-                .min()
-                .orElseThrow();
+                .summaryStatistics();
 
-        int maxInterval = intervals.stream()
-                .mapToInt(ProducerIntervalDTO::interval)
-                .max()
-                .orElseThrow();
-
-        List<ProducerIntervalDTO> min = intervals.stream()
-                .filter(interval ->
-                        interval.interval() == minInterval)
-                .toList();
-
-        List<ProducerIntervalDTO> max = intervals.stream()
-                .filter(interval ->
-                        interval.interval() == maxInterval)
-                .toList();
-
-        return new AwardIntervalsResponseDTO(min, max);
+        return new AwardIntervalsResponseDTO(
+                intervals.stream().filter(p -> p.interval() == stats.getMin()).toList(),
+                intervals.stream().filter(p -> p.interval() == stats.getMax()).toList()
+        );
     }
 
-    private List<ProducerIntervalDTO> handleIntervals(Map<String, List<Integer>> winsByProducer) {
+    private List<ProducerIntervalDTO> calculateIntervals(List<WinEntry> entries) {
+        List<WinEntry> sorted = entries.stream()
+                .sorted(Comparator.comparing(WinEntry::producer).thenComparingInt(WinEntry::year))
+                .toList();
 
-        List<ProducerIntervalDTO> intervals = new ArrayList<>();
-
-        winsByProducer.forEach((producer, years) -> {
-
-            if (years.size() >= 2) {
-
-                List<Integer> sortedYears = years.stream().sorted().toList();
-                for (int i = 1; i < sortedYears.size(); i++) {
-                    Integer previousWin = sortedYears.get(i - 1);
-                    Integer followingWin = sortedYears.get(i);
-
-                    intervals.add(
-                            new ProducerIntervalDTO(
-                                    producer,
-                                    followingWin - previousWin,
-                                    previousWin,
-                                    followingWin
-                            )
-                    );
-                }
-            }
-        });
-
-        return intervals;
+        return IntStream.range(1, sorted.size())
+                .filter(i -> sorted.get(i).producer().equals(sorted.get(i - 1).producer()))
+                .mapToObj(i -> new ProducerIntervalDTO(
+                        sorted.get(i).producer(),
+                        sorted.get(i).year() - sorted.get(i - 1).year(),
+                        sorted.get(i - 1).year(),
+                        sorted.get(i).year()))
+                .toList();
     }
 
-    private List<String> handleProducers(@Nonnull String producers) {
-        
-        if (producers.isEmpty()) {
-            return new ArrayList<>();
+    private List<String> parseProducers(@Nonnull String producers) {
+
+        if (producers.isBlank()) {
+            return List.of();
         }
 
-        String normalizedProducers = producers.replaceAll("\\s+and\\s+", ",");
-        String[] producerNames = normalizedProducers.split(",");
+        String[] producerNames = producers.split(",|\\s+and\\s+");
 
         return Arrays.stream(producerNames)
                 .map(String::trim)
